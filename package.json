@@ -1,0 +1,43 @@
+{
+	"name": "@nickdevelop/pi-plugins",
+	"version": "0.1.0",
+	"description": "Pi coding-agent packages. Ships opencode-providers: registers every OpenCode Console connection as its own Pi model provider.",
+	"type": "module",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/nickdevelop/pi-plugins.git"
+	},
+	"bugs": {
+		"url": "https://github.com/nickdevelop/pi-plugins/issues"
+	},
+	"homepage": "https://github.com/nickdevelop/pi-plugins#readme",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"opencode",
+		"opencode-console",
+		"providers",
+		"models"
+	],
+	"files": [
+		"opencode-providers/*.ts",
+		"opencode-providers/README.md",
+		"README.md"
+	],
+	"scripts": {
+		"test": "node --experimental-strip-types --no-warnings opencode-providers/test.ts",
+		"test:live": "LIVE=1 node --experimental-strip-types --no-warnings opencode-providers/test.ts",
+		"typecheck": "npx --yes -p typescript@5.9.3 tsc --noEmit --strict --skipLibCheck --target es2022 --module nodenext --moduleResolution nodenext --allowImportingTsExtensions opencode-providers/index.ts opencode-providers/test.ts opencode-providers/fixtures.ts"
+	},
+	"pi": {
+		"extensions": [
+			"./opencode-providers/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}

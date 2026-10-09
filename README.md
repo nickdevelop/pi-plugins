@@ -8,7 +8,14 @@ Pi coding-agent 的扩展集合，作为一个 [pi package](https://github.com/b
 pi install git:github.com/nickdevelop/pi-plugins
 ```
 
-其它写法等价：`git:github.com/nickdevelop/pi-plugins@v0.1.0`（tag/commit 会被钉住）、`https://github.com/nickdevelop/pi-plugins`。
+其它写法等价：`git:github.com/nickdevelop/pi-plugins@v0.1.0`（tag / commit 会被钉住，`pi update` 不会移动它）、`https://github.com/nickdevelop/pi-plugins`。
+
+Pi 会把 `github.com/user/repo` 规范化成 **HTTPS** 再克隆。只能走 SSH 的环境（防火墙、只有 deploy key）用显式 SSH 地址，Pi 会原样保留：
+
+```bash
+pi install git:git@github.com:nickdevelop/pi-plugins.git
+pi install git:ssh://git@github.com/nickdevelop/pi-plugins.git
+```
 
 ```bash
 pi list                        # 查看已安装的 package

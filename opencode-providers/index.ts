@@ -22,7 +22,8 @@
  *   OPENCODE_CONSOLE_ONLY         comma separated names / ids to keep
  *   OPENCODE_CONSOLE_SKIP         comma separated names / ids to drop
  *   OPENCODE_CONSOLE_INCLUDE_BUILTIN  "0" skips connections marked builtIn (default keep)
- *   OPENCODE_CONSOLE_SKIP_FREE_TIER   hide free-tier models (default "1"; "0" registers them anyway)
+ *   OPENCODE_CONSOLE_SKIP_FREE_TIER   hide OpenCode's app-only "-free" models (default "1"; "0"
+                                     registers them anyway; vendor ":free" models are always kept)
  *   OPENCODE_CONSOLE_TTL_MS       catalog cache lifetime (default 900000)
  *   OPENCODE_CONSOLE_TIMEOUT_MS   per-request timeout (default 10000)
  *   OPENCODE_CONSOLE_MAX_OUTPUT   output ceiling when a model omits limits.output
@@ -392,9 +393,17 @@ function installAnthropicPathShim(bases: string[]): void {
 /** Bases whose Anthropic requests need the `/messages` rewrite; filled by syncProviders. */
 let stateAnthropicBases: string[] = [];
 
-function isFreeTier(entry: ConsoleModelEntry): boolean {
-	if (/-free$/.test(entry.modelId) || /-free$/.test(entry.apiId ?? "")) return true;
-	return (entry.costTiers ?? []).length > 0 && (entry.costTiers ?? []).every((tier) => !tier.input && !tier.output);
+/**
+ * OpenCode's own app-only free tier: those models carry a `-free` suffix and the inference proxy
+ * refuses them outside the OpenCode app (`403 FreeTierError: OpenCode's free tier can only be used
+ * from within OpenCode`).
+ *
+ * Price is deliberately not a signal. A vendor free model on a custom connection, e.g.
+ * `inclusionai/ling-3.1-flash:free`, also reports zero costTiers yet answers 200 through the same
+ * proxy, so hiding by price removes models that work. Only OpenCode's own naming is trusted.
+ */
+function isAppOnlyFreeTier(entry: ConsoleModelEntry): boolean {
+	return /-free$/i.test(entry.modelId) || /-free$/i.test(entry.apiId ?? "");
 }
 
 function convertCost(tiers: CostTier[] | undefined): ProviderModelConfig["cost"] {
@@ -476,7 +485,7 @@ function convertConnection(
 		if (entry.enabled !== true) continue; // requirement: enabled models only
 		if (entry.available === false) continue;
 		if (/deprecat/i.test(entry.status ?? "")) continue;
-		if (isFreeTier(entry)) {
+		if (isAppOnlyFreeTier(entry)) {
 			freeModels++;
 			if (cfg.skipFreeTier) continue;
 		}
@@ -488,7 +497,7 @@ function convertConnection(
 	}
 
 	if (freeModels > 0 && !cfg.skipFreeTier) {
-		report(`${detail.name}: ${freeModels} free-tier model(s) registered; OpenCode serves those to its own app only, so requests fail with FreeTierError`);
+		report(`${detail.name}: ${freeModels} "-free" model(s) registered; OpenCode serves its own free tier to its app only, so requests fail with FreeTierError`);
 	}
 	// Hiding free-tier models is the default, so a connection left with nothing is expected and
 	// stays quiet; /opencode status reports it. Anything else is worth a warning.
@@ -516,9 +525,9 @@ interface State {
 	ctx: ExtensionContext | undefined;
 	/** What the last sync registered, in preference order for the auto-select. */
 	candidates: ModelCandidate[];
-	/** Free-tier models hidden by the last sync (OpenCode serves them to its own app only). */
+	/** OpenCode `-free` models hidden by the last sync (their requests fail with FreeTierError). */
 	hiddenFreeTier: number;
-	/** Connections that registered nothing because only free-tier models were available. */
+	/** Connections that registered nothing because only `-free` models were available. */
 	hiddenConnections: string[];
 	/** Where each registered provider's requests actually go, for `/opencode probe`. */
 	endpoints: Map<string, { baseUrl: string; api: string }>;
@@ -862,10 +871,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					`opencode: ${state.registered.size} providers, ${state.modelTotal} models, last sync ${state.lastSync}`,
 					`token: ${auth ? auth.source : "MISSING"} · api: ${cfg.apiBase}`,
 					state.hiddenFreeTier > 0
-						? `free tier: ${state.hiddenFreeTier} model(s) hidden (OpenCode serves them to its own app only; OPENCODE_CONSOLE_SKIP_FREE_TIER=0 registers them anyway)${
+						? `free tier: ${state.hiddenFreeTier} OpenCode "-free" model(s) hidden (app-only, requests fail with FreeTierError; OPENCODE_CONSOLE_SKIP_FREE_TIER=0 registers them anyway; vendor ":free" models are always kept)${
 								state.hiddenConnections.length > 0 ? `; no provider for: ${state.hiddenConnections.join(", ")}` : ""
 							}`
-						: "free tier: registered",
+						: 'free tier: "-free" models registered',
 					`sign in: /login → ${LOGIN_HOST_NAME} (or set OPENCODE_CONSOLE_TOKEN)`,
 					`commands: /opencode refresh · /opencode list · /opencode models <provider>`,
 				].join("\n"),

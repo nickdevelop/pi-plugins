@@ -76,7 +76,7 @@ token 解析优先级：`OPENCODE_CONSOLE_TOKEN` / `OPENCODE_TOKEN` / `OPENCODE_
 | `OPENCODE_CONSOLE_PREFIX` | `occ` | provider id 前缀；`off` 表示直接用 slug 名 |
 | `OPENCODE_CONSOLE_ONLY` / `OPENCODE_CONSOLE_SKIP` | — | 按 name / configKey / conn id 过滤（逗号分隔，子串匹配） |
 | `OPENCODE_CONSOLE_INCLUDE_BUILTIN` | `1` | 设为 `0` 跳过 `builtIn: true` 的连接 |
-| `OPENCODE_CONSOLE_SKIP_FREE_TIER` | `1` | 默认隐藏免费档模型；`0` 仍然注册它们（调起会报 `FreeTierError`） |
+| `OPENCODE_CONSOLE_SKIP_FREE_TIER` | `1` | 默认隐藏 OpenCode 自家 `-free` 模型；`0` 也注册它们（调用会报 `FreeTierError`）。厂商的 `:free` 模型始终保留 |
 | `OPENCODE_CONSOLE_TTL_MS` | `900000` | 目录缓存有效期；未过期时启动不再发请求 |
 | `OPENCODE_CONSOLE_TIMEOUT_MS` | `10000` | 单次请求超时 |
 | `OPENCODE_CONSOLE_PATH_SHIM` | `1` | anthropic 连接的路径改写（`{base}/v1/messages` → `{base}/messages`）；`0` 关闭并改为启动告警 |
@@ -109,7 +109,9 @@ Console 代理把**客户端路径**拼到该连接自己的 `baseUrl` 上：
 
 ## 已知限制
 
-- **免费档模型默认不注册**（id 以 `-free` 结尾，或 `costTiers` 全零）：OpenCode 服务端只允许它自家客户端调用，在 Pi 里必定返回 `{"type":"FreeTierError"}`。这是预期行为，启动时**不会**因此弹告警；隐藏数量与因此没有 provider 的连接名在 `/opencode` 状态里可见。确认后果后可以用 `OPENCODE_CONSOLE_SKIP_FREE_TIER=0` 强制注册（扩展不会伪装成 OpenCode 客户端去绕过该限制）。
+- **只隐藏 OpenCode 自家的 `-free` 模型**（id 以 `-free` 结尾）：这批是 OpenCode 的 app-only 免费额度，代理只允许它自家客户端调用，在 Pi 里必定 403 `{"type":"FreeTierError"}`。
+  **价格不作为判据**：连接里的厂商免费模型（例如 `inclusionai/ling-3.1-flash:free`）`costTiers` 同样是全零，但同一个代理会正常返回 200，所以按价格隐藏会误杀可用模型 —— 只认 OpenCode 自己的 `-free` 命名。
+  隐藏是预期行为，启动时**不会**弹告警；隐藏数量与因此没有 provider 的连接名在 `/opencode` 状态里可见。确认后果后可用 `OPENCODE_CONSOLE_SKIP_FREE_TIER=0` 强制注册（扩展不会伪装成 OpenCode 客户端去绕过该限制）。
 - provider id 由 `name` slug 化而来：在 Console 里重命名连接会改变 provider id（旧会话里保存的 `provider/model` 需要重新选择）。
 - Pi 的 chat 模型只支持 `text` / `image` 输入，`audio` / `video` / `pdf` 能力会被丢弃。
 - 扩展自身不写凭据：`/login` 得知的 token 由 **Pi** 写入 `~/.pi/agent/auth.json`（`opencode-console` 条目）；扩展只读取自己那一条，且从不打印 token。

@@ -152,6 +152,18 @@ export const COMMAND_CODE_DETAIL = {
 			enabled: true,
 		},
 		{
+			// Vendor free model: zero costTiers but callable, so it must never be hidden.
+			providerId: "conn_01M34AFH6R8YY5RDEJA5MSEHXD",
+			modelId: "inclusionai/ling-3.1-flash:free",
+			apiId: "inclusionai/ling-3.1-flash:free",
+			name: "Ling 3.1 Flash",
+			capabilities: { toolCall: true, inputTypes: ["text"], outputTypes: ["text"] },
+			limits: { context: 262144 },
+			costTiers: [{ type: "base", input: 0, output: 0, cacheRead: 0 }],
+			available: true,
+			enabled: true,
+		},
+		{
 			providerId: "conn_01M34AFH6R8YY5RDEJA5MSEHXD",
 			modelId: "no-limits/model",
 			apiId: "no-limits/model",

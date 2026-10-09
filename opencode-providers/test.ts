@@ -118,7 +118,7 @@ for (const config of [...run.registrations.values()].map((entry) => entry.config
 const commandCode = modelsOf(run.registrations.get("occ-command-code")!.config);
 assert.deepEqual(
 	commandCode.map((model) => model.id),
-	["deepseek/deepseek-v4.1-flash", "gpt-6-luna", "longcontext/model"],
+	["deepseek/deepseek-v4.1-flash", "gpt-6-luna", "longcontext/model", "inclusionai/ling-3.1-flash:free"],
 	"only enabled, available, non-deprecated models are registered",
 );
 
@@ -160,7 +160,7 @@ assert.equal(defaultRun.registrations.get("occ-opencode"), undefined, "free-tier
 {
 	const notices: Array<{ message: string; level: string | undefined }> = [];
 	await commandOf(defaultRun).handler("status", makeCtx(defaultRun, notices));
-	assert.ok(notices.some((notice) => /free tier: 1 model\(s\) hidden.*no provider for: OpenCode/.test(notice.message)), "/opencode status explains the hidden free-tier models");
+	assert.ok(notices.some((notice) => /free tier: 1 OpenCode "-free" model\(s\) hidden.*no provider for: OpenCode/.test(notice.message)), "/opencode status explains the hidden free-tier models");
 	assert.ok(notices.every((notice) => !/no usable enabled models|only free-tier/.test(notice.message)), "hiding free-tier models is expected and never warns at startup");
 }
 process.env.OPENCODE_CONSOLE_SKIP_FREE_TIER = "0";
@@ -198,7 +198,7 @@ const refresh = run.registrations.get("occ-command-code")!.config.refreshModels!
 const refreshed = (await refresh({ signal: AbortSignal.timeout(5000), allowNetwork: true, publish: async () => true })) as ProviderModelConfig[];
 assert.deepEqual(
 	refreshed.map((model) => model.id),
-	["deepseek/deepseek-v4.1-flash", "gpt-6-luna", "longcontext/model"],
+	["deepseek/deepseek-v4.1-flash", "gpt-6-luna", "longcontext/model", "inclusionai/ling-3.1-flash:free"],
 	"refreshModels re-reads the connection catalog",
 );
 
@@ -270,17 +270,17 @@ assert.deepEqual(
 
 	await command.handler("refresh", ctx);
 	assert.ok(
-		notices.some((notice) => /2 providers \/ 4 models/.test(notice.message)),
+		notices.some((notice) => /2 providers \/ 5 models/.test(notice.message)),
 		"/opencode refresh reports the synced catalog",
 	);
 	assert.ok(
-		notices.some((notice) => /free-tier/.test(notice.message)),
+		notices.some((notice) => /"-free" model\(s\) registered/.test(notice.message)),
 		"/opencode refresh surfaces the free-tier warning",
 	);
 	assert.equal(fake.registrations.size, 3, "refresh keeps both providers plus the login anchor");
 
 	await command.handler("status", ctx);
-	assert.ok(notices.some((notice) => /free tier: registered/.test(notice.message)), "/opencode status says when free-tier models are registered");
+	assert.ok(notices.some((notice) => /free tier: "-free" models registered/.test(notice.message)), "/opencode status says when free-tier models are registered");
 }
 
 // 4b. With the default settings the same refresh hides free-tier models instead of warning.
@@ -292,9 +292,12 @@ assert.deepEqual(
 	await extension(fake.pi);
 	const notices: Array<{ message: string; level: string | undefined }> = [];
 	await commandOf(fake).handler("refresh", makeCtx(fake, notices));
-	assert.ok(notices.some((notice) => /1 providers \/ 3 models/.test(notice.message)), "free-tier models are not registered by default");
+	const kept = modelsOf(fake.registrations.get("occ-command-code")!.config).map((model) => model.id);
+	assert.ok(kept.includes("inclusionai/ling-3.1-flash:free"), 'a vendor ":free" model stays registered: zero cost is not OpenCode\'s free tier');
+	assert.ok(!kept.some((id) => /-free$/i.test(id)), "only OpenCode's own `-free` models are hidden");
+	assert.ok(notices.some((notice) => /1 providers \/ 4 models/.test(notice.message)), 'OpenCode "-free" models are not registered by default');
 	await commandOf(fake).handler("status", makeCtx(fake, notices));
-	assert.ok(notices.some((notice) => /free tier: 1 model\(s\) hidden/.test(notice.message)), "/opencode status explains the hidden free-tier models");
+	assert.ok(notices.some((notice) => /free tier: 1 OpenCode "-free" model\(s\) hidden/.test(notice.message)), "/opencode status explains the hidden free-tier models");
 	process.env.OPENCODE_CONSOLE_SKIP_FREE_TIER = "0";
 }
 

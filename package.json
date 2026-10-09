@@ -1,6 +1,6 @@
 {
 	"name": "@nickdevelop/pi-plugins",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Pi coding-agent packages. Ships opencode-providers: registers every OpenCode Console connection as its own Pi model provider.",
 	"type": "module",
 	"license": "MIT",

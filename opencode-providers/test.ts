@@ -18,8 +18,6 @@ import { ANTHROPIC_DETAIL, ANTHROPIC_SUMMARY, COMMAND_CODE_DETAIL, DEFAULT_DETAI
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-occ-"));
 process.env.OPENCODE_CONSOLE_TOKEN = "oc_sk_test_token";
-// Always read the mocked console; never a previous run's catalog cache.
-process.env.OPENCODE_CONSOLE_TTL_MS = "1";
 delete process.env.OPENCODE_CONSOLE_ONLY;
 delete process.env.OPENCODE_CONSOLE_SKIP;
 delete process.env.OPENCODE_CONSOLE_SKIP_FREE_TIER;
@@ -82,14 +80,25 @@ function connectionsOf(fake: ReturnType<typeof makeFakePi>): string[] {
 
 /** Fresh agent dir per case, so nobody reads another case's catalog cache or auth.json. */
 function freshAgentDir(): string {
-	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-occ-"));
-	return process.env.PI_CODING_AGENT_DIR;
+	const dir = mkdtempSync(join(tmpdir(), "pi-occ-"));
+	process.env.PI_CODING_AGENT_DIR = dir;
+	return dir;
 }
 
-async function load(): Promise<ReturnType<typeof makeFakePi>> {
-	freshAgentDir();
+/** Load the extension into a fresh agent dir (cache-less: startup never fetches, so this
+ *registers Nathan only the login anchor when a cache is missing). Optional dir keeps the cache. */
+async function loadRaw(dir: string = freshAgentDir()): Promise<ReturnType<typeof makeFakePi>> {
+	process.env.PI_CODING_AGENT_DIR = dir;
 	const fake = makeFakePi();
 	await extension(fake.pi);
+	return fake;
+}
+
+/** Load + warm the catalog cache with one `/opencode refresh` (the runtime network path). */
+async function load(dir: string = freshAgentDir()): Promise<ReturnType<typeof makeFakePi>> {
+	const fake = await loadRaw(dir);
+	const notices: Array<{ message: string; level: string | undefined }> = [];
+	await commandOf(fake).handler("refresh", makeCtx(fake, notices));
 	return fake;
 }
 
@@ -193,23 +202,26 @@ installMockFetch({ details: DEFAULT_DETAILS });
 const recovered = await load();
 assert.deepEqual(connectionsOf(recovered), ["occ-command-code", "occ-opencode"], "recovered connection is registered again");
 
-// refreshModels must return the live model list for exactly that connection.
+// refreshModels must serve the cached model list without any network request: only /login and
+// /opencode refresh are allowed to call the console, even when the network has moved on.
 const refresh = run.registrations.get("occ-command-code")!.config.refreshModels!;
+const movedMock = installMockFetch({ list: [], details: {} }); // a different world on the network
 const refreshed = (await refresh({ signal: AbortSignal.timeout(5000), allowNetwork: true, publish: async () => true })) as ProviderModelConfig[];
 assert.deepEqual(
 	refreshed.map((model) => model.id),
 	["deepseek/deepseek-v4.1-flash", "gpt-6-luna", "longcontext/model", "inclusionai/ling-3.1-flash:free"],
-	"refreshModels re-reads the connection catalog",
+	"refreshModels returns the cached model list",
 );
+assert.equal(movedMock.requests.length, 0, "refreshModels is network-free");
 
 // A connection that is genuinely empty still warns, so real problems are not silenced with the
 // expected free-tier case.
 {
 	const emptyDetail = { ...COMMAND_CODE_DETAIL, models: [] };
 	installMockFetch({ details: { conn_01M34AFH6R8YY5RDEJA5MSEHXD: emptyDetail, conn_01KGS82J4BJD9R59XFX4ASWSTD_opencode: OPENCODE_DETAIL } });
-	const emptyRun = await load();
+	const emptyRun = await loadRaw();
 	const notices: Array<{ message: string; level: string | undefined }> = [];
-	await commandOf(emptyRun).handler("status", makeCtx(emptyRun, notices));
+	await commandOf(emptyRun).handler("refresh", makeCtx(emptyRun, notices));
 	assert.ok(notices.some((notice) => /command code: no usable enabled models/.test(notice.message)), "a truly empty connection still warns");
 }
 
@@ -223,8 +235,8 @@ assert.deepEqual(
 	const mock = installMockFetch({ list: [ANTHROPIC_SUMMARY], details: { conn_anthropic_trap: ANTHROPIC_DETAIL } });
 	const notices: Array<{ message: string; level: string | undefined }> = [];
 
-	const fixed = await load();
-	await commandOf(fixed).handler("status", makeCtx(fixed, notices));
+	const fixed = await loadRaw();
+	await commandOf(fixed).handler("refresh", makeCtx(fixed, notices));
 	assert.ok(notices.every((notice) => !/\/v1/.test(notice.message)), "no warning while the path adaptation is active");
 
 	await commandOf(fixed).handler("probe", makeCtx(fixed, notices));
@@ -232,9 +244,9 @@ assert.deepEqual(
 	assert.equal(probed, "https://opencode.ai/inference/custom/conn_anthropic_trap/messages", "outgoing anthropic request uses the console path");
 
 	process.env.OPENCODE_CONSOLE_PATH_SHIM = "0";
-	const raw = await load();
+	const raw = await loadRaw();
 	const rawNotices: Array<{ message: string; level: string | undefined }> = [];
-	await commandOf(raw).handler("status", makeCtx(raw, rawNotices));
+	await commandOf(raw).handler("refresh", makeCtx(raw, rawNotices));
 	assert.ok(
 		rawNotices.some((notice) => /\/v1\/messages[\s\S]*remove the trailing \/v1 from "https:\/\/api\.example\.test\/provider\/v1"/.test(notice.message)),
 		"with the shim off, the doubled /v1 trap is reported with the exact fix",
@@ -254,9 +266,7 @@ assert.deepEqual(
 
 {
 	installMockFetch({ details: DEFAULT_DETAILS });
-	freshAgentDir();
-	const fake = makeFakePi();
-	await extension(fake.pi);
+	const fake = await load();
 
 	const notices: Array<{ message: string; level: string | undefined }> = [];
 	const ctx = makeCtx(fake, notices);
@@ -287,9 +297,7 @@ assert.deepEqual(
 {
 	delete process.env.OPENCODE_CONSOLE_SKIP_FREE_TIER;
 	installMockFetch({ details: DEFAULT_DETAILS });
-	freshAgentDir();
-	const fake = makeFakePi();
-	await extension(fake.pi);
+	const fake = await load();
 	const notices: Array<{ message: string; level: string | undefined }> = [];
 	await commandOf(fake).handler("refresh", makeCtx(fake, notices));
 	const kept = modelsOf(fake.registrations.get("occ-command-code")!.config).map((model) => model.id);
@@ -319,9 +327,7 @@ assert.equal(tokenless.commands.has("opencode"), true, "the /opencode command st
 
 {
 	installMockFetch({ details: DEFAULT_DETAILS });
-	freshAgentDir();
-	const fake = makeFakePi();
-	await extension(fake.pi);
+	const fake = await loadRaw();
 	const method = fake.registrations.get("opencode-console")!.config.oauth!;
 
 	const progress: string[] = [];
@@ -365,18 +371,69 @@ assert.equal(tokenless.commands.has("opencode"), true, "the /opencode command st
 	installMockFetch({ details: DEFAULT_DETAILS });
 	const dir = mkdtempSync(join(tmpdir(), "pi-occ-"));
 	writeFileSync(join(dir, "auth.json"), JSON.stringify({ "opencode-console": { type: "oauth", access: "oc_sk_saved", refresh: "", expires: 0 } }));
-	process.env.PI_CODING_AGENT_DIR = dir;
-	const resumed = makeFakePi();
-	await extension(resumed.pi);
+
+	// First run with only a stored credential: it is authorized to warm up once via /opencode
+	// refresh, which also builds the cache for every run after it.
+	const resumed = await loadRaw(dir);
+	await commandOf(resumed).handler("refresh", makeCtx(resumed, []));
 	assert.deepEqual(
 		connectionsOf(resumed),
 		["occ-command-code", "occ-opencode"],
-		"the stored credential is read back at startup, no env token needed",
+		"the stored credential is read back, no env token needed",
 	);
 	assert.equal(resumed.registrations.get("occ-opencode")!.config.apiKey, "oc_sk_saved", "the stored token authorizes requests");
+
+	// Next run: pure cache + stored token. Startup must not touch the network at all — even if the
+	// console would fail or change.
+	const untouched = installMockFetch({ list: [], details: {} }); // the network has moved on
+	const again = makeFakePi();
+	await extension(again.pi);
+	assert.deepEqual(
+		connectionsOf(again),
+		["occ-command-code", "occ-opencode"],
+		"the next startup registers from the cache, no network requests",
+	);
+	assert.equal(again.registrations.get("occ-opencode")!.config.apiKey, "oc_sk_saved", "startup still uses the stored token");
+	assert.equal(untouched.requests.length, 0, "startup made zero console API requests");
 }
 
 process.env.OPENCODE_CONSOLE_TOKEN = "oc_sk_test_token";
+
+// ---------------------------------------------------------------------------
+// 8. Catalog reads are cache-first: only /login and /opencode refresh go to the network
+// ---------------------------------------------------------------------------
+{
+	installMockFetch({ details: DEFAULT_DETAILS });
+
+	// First run with a token but without a cache: startup must not fetch anything.
+	const cold = await loadRaw();
+	assert.deepEqual(connectionsOf(cold), [], "startup with a token but no cache registers nothing — and fetches nothing");
+	const coldNotices: Array<{ message: string; level: string | undefined }> = [];
+	await commandOf(cold).handler("status", makeCtx(cold, coldNotices));
+	assert.ok(coldNotices.some((notice) => /no cached OpenCode catalog yet/.test(notice.message)), "the missing cache explains how to build it");
+
+	// One refresh warms the cache; the next startup then serves it, even when the console changed.
+	const dir = freshAgentDir();
+	await load(dir);
+	const changed = installMockFetch({ list: [ANTHROPIC_SUMMARY], details: { conn_anthropic_trap: ANTHROPIC_DETAIL } }); // a different world on the network
+	const resumed = await loadRaw(dir);
+	assert.deepEqual(connectionsOf(resumed), ["occ-command-code", "occ-opencode"], "startup serves the cached catalog even though the network has changed");
+	assert.equal(changed.requests.length, 0, "startup made zero console API requests");
+
+	const refresh = resumed.registrations.get("occ-command-code")!.config.refreshModels!;
+	const refreshed = (await refresh({ signal: AbortSignal.timeout(5000), allowNetwork: true, publish: async () => true })) as ProviderModelConfig[];
+	assert.ok(refreshed.some((model) => model.id === "gpt-6-luna"), "refreshModels also serves the cache after the network changed");
+	assert.equal(changed.requests.length, 0, "refreshModels made zero console API requests");
+
+	// /opencode refresh is the escape hatch: it re-reads the network and the cache follows.
+	await commandOf(resumed).handler("refresh", makeCtx(resumed, []));
+	assert.deepEqual(connectionsOf(resumed), ["occ-anthropic-trap"], "/opencode refresh re-reads the network and re-registers");
+
+	const after = installMockFetch({ list: [], details: {} });
+	const synced = await loadRaw(dir);
+	assert.deepEqual(connectionsOf(synced), ["occ-anthropic-trap"], "the refreshed catalog is what the next startup reads from the cache");
+	assert.equal(after.requests.length, 0, "still no startup network requests");
+}
 
 // ---------------------------------------------------------------------------
 // 6. Optional live check against the real Console API

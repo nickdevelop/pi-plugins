@@ -37,6 +37,23 @@ export OPENCODE_CONSOLE_TOKEN=oc_sk_xxx            # Console + 推理代理共�
 pi --list-models                                    # 已安装则直接可见；未安装则加 -e ./opencode-providers
 ```
 
+## 运行流程（缓存优先）
+
+**只有两个入口会调用 Console API：`/login` 和 `/opencode refresh`。**它们重新拉取目录、回写缓存并重注册所有连接；其余路径全部只读缓存，不发网络请求：
+
+| 路径 | 数据源 |
+|---|---|
+| `/login`（校验 token + 首次/重新同步） | Console API |
+| `/opencode refresh` | Console API（单连接拉取失败回退该连接的缓存副本） |
+| 启动、后续 `session_start`、`refreshModels`（Pi 打开 `/model` / `pi list --models`） | 本地缓存 |
+
+因此：
+
+- 首次在全新环境使用时（有 token 但无缓存），启动只会注册登录锚点并提示先跑一次 `/opencode refresh`（或 `/login`）来建立缓存；
+- 目录更新发生在你显式刷新时，`/opencode` 状态里的 `last sync` 会展示缓存年龄。
+
+目录缓存在 `$PI_CODING_AGENT_DIR/cache/opencode-providers.json`（默认 `~/.pi/agent/cache/…`）。
+
 ## 登录宿主 provider
 
 连接列表本身需要 token 才能获取，所以下载时会出现一个**不带模型**的锚点 provider `opencode-console`（显示名 `OpenCode Console`），它只负责提供 `/login` / `/logout` 入口；登录成功后才会出现真正的连接 provider。每个连接 provider 也挂着同一个登录方法，所以 `/login occ-command-code` 同样可用。
@@ -65,7 +82,7 @@ token 解析优先级：`OPENCODE_CONSOLE_TOKEN` / `OPENCODE_TOKEN` / `OPENCODE_
 
 被过滤掉的模型：`enabled !== true`、`available === false`、`status` 含 `deprecat`、缺少 `limits.context`、同一 provider 内 id 重复，以及默认隐藏的免费档模型。
 
-每个 provider 都带 `refreshModels`：Pi 刷新模型目录（如打开 `/model`）时重新拉取该连接，失败时保留上一次的列表而不是清空。
+每个 provider 都带 `refreshModels`：Pi 刷新模型目录（如打开 `/model`）时**从缓存**重读该连接，不打网络；缓存中没有该连接（或转换后为空）时抛错，Pi 会保留上一次的模型列表而不是清空。目录内容只在 `/login` / `/opencode refresh` 后才会变化。
 
 ## 配置（环境变量）
 
@@ -77,17 +94,16 @@ token 解析优先级：`OPENCODE_CONSOLE_TOKEN` / `OPENCODE_TOKEN` / `OPENCODE_
 | `OPENCODE_CONSOLE_ONLY` / `OPENCODE_CONSOLE_SKIP` | — | 按 name / configKey / conn id 过滤（逗号分隔，子串匹配） |
 | `OPENCODE_CONSOLE_INCLUDE_BUILTIN` | `1` | 设为 `0` 跳过 `builtIn: true` 的连接 |
 | `OPENCODE_CONSOLE_SKIP_FREE_TIER` | `1` | 默认隐藏 OpenCode 自家 `-free` 模型；`0` 也注册它们（调用会报 `FreeTierError`）。厂商的 `:free` 模型始终保留 |
-| `OPENCODE_CONSOLE_TTL_MS` | `900000` | 目录缓存有效期；未过期时启动不再发请求 |
-| `OPENCODE_CONSOLE_TIMEOUT_MS` | `10000` | 单次请求超时 |
+| `OPENCODE_CONSOLE_TIMEOUT_MS` | `10000` | 单次请求超时（Console 目录拉取与 `/opencode probe`） |
 | `OPENCODE_CONSOLE_PATH_SHIM` | `1` | anthropic 连接的路径改写（`{base}/v1/messages` → `{base}/messages`）；`0` 关闭并改为启动告警 |
 | `OPENCODE_CONSOLE_MAX_OUTPUT` | `32000` | 模型缺 `limits.output` 时的输出上限 |
 
-目录缓存在 `$PI_CODING_AGENT_DIR/cache/opencode-providers.json`（默认 `~/.pi/agent/cache/…`）。`PI_OFFLINE=1` 时只用缓存。
+目录拉取本身不再受 TTL 控制：缓存永不过期，只有 `/login` / `/opencode refresh` 才会重新拉取（旧版的 `OPENCODE_CONSOLE_TTL_MS` 与 `PI_OFFLINE` 已移除——缓存优先现在是默认行为）。
 
 ## 会话内命令
 
-- `/opencode` — 状态（provider 数、模型数、上次同步、token 来源、被隐藏的免费档数量）
-- `/opencode refresh` — 强制重新拉取；连接消失会被 `unregisterProvider` 摘掉
+- `/opencode` — 状态（provider 数、模型数、上次同步/缓存年龄、token 来源、被隐藏的免费档数量）
+- `/opencode refresh` — 强制重新拉取（唯一运行时联网入口之一）；连接消失会被 `unregisterProvider` 摘掉
 - `/opencode list` — provider id ← conn id 对照
 - `/opencode models <provider>` — 该 provider 下的模型
 - `/opencode probe <provider> [model]` — 用 Pi 完全相同的请求路径打一次 `max_tokens=1` 的请求，直接打印 HTTP 状态和上游错误，用于判断是配置问题还是模型问题
@@ -113,6 +129,7 @@ Console 代理把**客户端路径**拼到该连接自己的 `baseUrl` 上：
   **价格不作为判据**：连接里的厂商免费模型（例如 `inclusionai/ling-3.1-flash:free`）`costTiers` 同样是全零，但同一个代理会正常返回 200，所以按价格隐藏会误杀可用模型 —— 只认 OpenCode 自己的 `-free` 命名。
   隐藏是预期行为，启动时**不会**弹告警；隐藏数量与因此没有 provider 的连接名在 `/opencode` 状态里可见。确认后果后可用 `OPENCODE_CONSOLE_SKIP_FREE_TIER=0` 强制注册（扩展不会伪装成 OpenCode 客户端去绕过该限制）。
 - provider id 由 `name` slug 化而来：在 Console 里重命名连接会改变 provider id（旧会话里保存的 `provider/model` 需要重新选择）。
+- **目录只在显式刷新时更新**：介于两次 `/opencode refresh`（或 `/login`）之间，模型列表不会变；Console 侧新增的模型要等你刷新一次才会出现。
 - Pi 的 chat 模型只支持 `text` / `image` 输入，`audio` / `video` / `pdf` 能力会被丢弃。
 - 扩展自身不写凭据：`/login` 得知的 token 由 **Pi** 写入 `~/.pi/agent/auth.json`（`opencode-console` 条目）；扩展只读取自己那一条，且从不打印 token。
 - Console token 不轮换，所以 `refreshToken` 直接返回原凭据，`expires` 设为 ≈10 年后，不会触发刷新。
@@ -126,4 +143,4 @@ npm run typecheck
 node --experimental-strip-types --no-warnings opencode-providers/test.ts   # 等价的手动跑法
 ```
 
-覆盖：一连接一 provider、仅 `enabled` 模型、字段映射（含多档 `costTiers`）、过滤器（含默认隐藏免费档、`=0` 时重新注册并警告）、单连接失败不影响其他连接、`refreshModels`、`/opencode` 命令、无 token 时只注册登录锚点、`/login` 流程（校验失败不落库、登录后立即注册并共享 token）、`auth.json` 凭据回读。
+覆盖：一连接一 provider、仅 `enabled` 模型、字段映射（含多档 `costTiers`）、过滤器（含默认隐藏免费档、`=0` 时重新注册并警告）、单连接失败不影响其他连接、目录缓存优先（启动/`refreshModels` 发 **0** 个网络请求，`/login` 与 `/opencode refresh` 才联网）、`refreshModels` 读缓存、`/opencode` 命令、无 token 时只注册登录锚点、`/login` 流程（校验失败不落库、登录后立即注册并共享 token）、`auth.json` 凭据回读（下次启动纯缓存组装）。

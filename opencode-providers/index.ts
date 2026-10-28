@@ -14,6 +14,10 @@
  * Requests are delegated to Pi's built-in `openai-completions` implementation, because every
  * Console connection is served through an OpenAI-compatible inference proxy (`requestBaseUrl`).
  *
+ * Catalog freshness: ONLY `/login` and `/opencode refresh` call the Console API. Everything else
+ * (startup, later `session_start`s, each provider's `refreshModels`) reads the on-disk cache
+ * written by those two.
+ *
  * Configuration (environment):
  *   OPENCODE_CONSOLE_TOKEN        console + inference token (or sign in with /login)
  *   OPENCODE_CONSOLE_TOKEN_FILE   read the token from this file instead
@@ -24,7 +28,6 @@
  *   OPENCODE_CONSOLE_INCLUDE_BUILTIN  "0" skips connections marked builtIn (default keep)
  *   OPENCODE_CONSOLE_SKIP_FREE_TIER   hide OpenCode's app-only "-free" models (default "1"; "0"
                                      registers them anyway; vendor ":free" models are always kept)
- *   OPENCODE_CONSOLE_TTL_MS       catalog cache lifetime (default 900000)
  *   OPENCODE_CONSOLE_TIMEOUT_MS   per-request timeout (default 10000)
  *   OPENCODE_CONSOLE_MAX_OUTPUT   output ceiling when a model omits limits.output
  */
@@ -98,7 +101,6 @@ interface ConsoleModelEntry {
 
 const DEFAULT_API_BASE = "https://opencode.ai/console/api";
 const DEFAULT_PREFIX = "occ";
-const DEFAULT_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_OUTPUT = 32_000;
 
@@ -125,12 +127,10 @@ interface Config {
 	skip: string[];
 	includeBuiltin: boolean;
 	skipFreeTier: boolean;
-	ttlMs: number;
 	timeoutMs: number;
 	defaultMaxOutput: number;
 	cachePath: string;
 	authPath: string;
-	offline: boolean;
 	/** Rewrite Pi's `<base>/v1/messages` to the console's `<base>/messages` for anthropic connections. */
 	pathShim: boolean;
 }
@@ -187,13 +187,11 @@ function readConfig(): Config {
 		skip: listValue("OPENCODE_CONSOLE_SKIP"),
 		includeBuiltin: envValue("OPENCODE_CONSOLE_INCLUDE_BUILTIN") !== "0",
 		skipFreeTier: envValue("OPENCODE_CONSOLE_SKIP_FREE_TIER") !== "0",
-		ttlMs: numberValue("OPENCODE_CONSOLE_TTL_MS", DEFAULT_TTL_MS),
 		timeoutMs: numberValue("OPENCODE_CONSOLE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
 		defaultMaxOutput: numberValue("OPENCODE_CONSOLE_MAX_OUTPUT", DEFAULT_MAX_OUTPUT),
 		cachePath: join(agentDir(), "cache", "opencode-providers.json"),
 		authPath: join(agentDir(), "auth.json"),
 		pathShim: envValue("OPENCODE_CONSOLE_PATH_SHIM") !== "0",
-		offline: process.env.PI_OFFLINE !== undefined && process.env.PI_OFFLINE !== "",
 	};
 }
 
@@ -277,7 +275,7 @@ async function mapLimited<A, B>(items: A[], limit: number, fn: (item: A) => Prom
 }
 
 // =============================================================================
-// Catalog cache (fast startup, offline fallback)
+// Catalog cache: the single data source between explicit syncs (/login, /opencode refresh)
 // =============================================================================
 
 interface CacheFile {
@@ -302,6 +300,18 @@ function writeCache(cfg: Config, connections: ConsoleProviderDetail[]): void {
 	} catch {
 		// The cache is an optimization; never fail startup because of it.
 	}
+}
+
+function cacheAge(cache: CacheFile): string {
+	const seconds = Math.round((Date.now() - cache.savedAt) / 1000);
+	if (seconds < 60) return `${seconds}s old`;
+	if (seconds < 3600) return `${Math.round(seconds / 60)}min old`;
+	return `${Math.round(seconds / 3600)}h old`;
+}
+
+/** The connection's detail as of the last explicit sync; `refreshModels` reads only this. */
+function cachedConnectionDetail(cfg: Config, connId: string): ConsoleProviderDetail | undefined {
+	return readCache(cfg)?.connections.find((entry) => entry.id === connId);
 }
 
 // =============================================================================
@@ -607,41 +617,40 @@ function isWanted(detail: ConsoleProviderDetail, cfg: Config): boolean {
 	return true;
 }
 
-async function loadConnections(
-	cfg: Config,
-	state: State,
-	token: string,
-	signal?: AbortSignal,
-): Promise<{ connections: ConsoleProviderDetail[]; source: string }> {
-	void state;
+/** Where a catalog read gets its data: the on-disk cache, or an explicit Console-network sync. */
+type CatalogMode = "cache" | "refresh";
+
+/**
+ * Cache-first catalog reads: only `/login` and `/opencode refresh` ask for `"refresh"`; startup,
+ * later `session_start`s and `refreshModels` read `"cache"` and never touch the network.
+ */
+async function readCatalog(cfg: Config, mode: CatalogMode, token: string, signal?: AbortSignal): Promise<{ connections: ConsoleProviderDetail[]; source: string }> {
 	const cache = readCache(cfg);
 
-	if (cfg.offline) {
-		if (cache) return { connections: cache.connections, source: "cache (offline)" };
-		throw new Error("offline and no cached OpenCode catalog");
+	if (mode === "cache") {
+		if (cache) return { connections: cache.connections, source: `cache (${cacheAge(cache)})` };
+		throw new Error("no cached OpenCode catalog yet — run /opencode refresh (or /login) once to build it");
 	}
 
-	if (!signal && cache && Date.now() - cache.savedAt < cfg.ttlMs) {
-		return { connections: cache.connections, source: `cache (${Math.round((Date.now() - cache.savedAt) / 1000)}s old)` };
-	}
-
+	// mode === "refresh": an explicit sync. Every listed connection is fetched again; one that
+	// fails falls back to its cached detail, so nothing disappears because of a blip.
 	const summaries = await listProviders(cfg, token, signal);
 	const wanted = summaries.filter((summary) => summary.enabled !== false);
 	const details = await mapLimited(wanted, 4, (summary) => fetchProviderDetail(cfg, token, summary.id, signal));
 
 	const connections: ConsoleProviderDetail[] = [];
 	const cachedByConn = new Map((cache?.connections ?? []).map((entry) => [entry.id, entry]));
-	wanted.forEach((summary, index) => {
+	for (const [index, summary] of wanted.entries()) {
 		const detail = details[index];
 		if (detail) connections.push(detail);
-		else if (!signal) {
+		else {
 			const fallback = cachedByConn.get(summary.id);
 			if (fallback) connections.push(fallback);
 		}
-	});
+	}
 
 	if (connections.length === 0) throw new Error(`OpenCode Console returned no usable connections (${wanted.length} listed)`);
-	if (!signal) writeCache(cfg, connections);
+	writeCache(cfg, connections); // the freshest catalog is what the next run and /model read
 	return { connections, source: "console api" };
 }
 
@@ -689,14 +698,12 @@ function syncProviders(
 			// token is stored for it. Pi prefers that credential over the API key fallback.
 			oauth: login,
 			models: converted.models,
-			// /model refresh and `pi list --models`: re-read this one connection.
-			refreshModels: async (context) => {
-				const signal = context?.signal;
-				if (signal?.aborted) throw new Error("aborted");
-				const auth = resolveToken(cfg, state);
-				if (!auth) throw new Error(`opencode-providers: not signed in for ${detail.name} (run /login)`);
-				const fresh = await fetchProviderDetail(cfg, auth.token, detail.id, signal);
-				const current = convertConnection(fresh, cfg, () => {}, []);
+			// /model refresh and `pi list --models` must stay network-free, so this re-reads only
+			// the cached catalog; `/opencode refresh` updates both cache and registered models.
+			refreshModels: async () => {
+				const cached = cachedConnectionDetail(cfg, detail.id);
+				if (!cached) throw new Error(`opencode-providers: ${detail.name} is not in the cached catalog (run /opencode refresh)`);
+				const current = convertConnection(cached, cfg, () => {}, []);
 				if (!current) throw new Error(`opencode-providers: ${detail.name} has no usable enabled models`);
 				return current.models;
 			},
@@ -735,14 +742,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const cfg = readConfig();
 	const state: State = { registered: new Map(), modelTotal: 0, notes: [], lastSync: "never", sessionToken: undefined, ctx: undefined, candidates: [], hiddenFreeTier: 0, hiddenConnections: [], endpoints: new Map() };
 
-	/** Fetch the catalog with the best available token and (re-)register every connection. */
-	async function syncNow(signal?: AbortSignal, tokenOverride?: string): Promise<string> {
+	/**
+	 * Register every connection from the chosen catalog source.
+	 *
+	 * mode "refresh" is for `/login` and `/opencode refresh` (they hit the Console API); mode
+	 * "cache" keeps every other path — startup, session_start — network-free.
+	 */
+	async function syncNow(mode: CatalogMode, signal?: AbortSignal, tokenOverride?: string): Promise<string> {
 		const auth = tokenOverride ? { token: tokenOverride, apiKey: tokenOverride, source: "login" } : resolveToken(cfg, state);
 		if (!auth) {
 			state.notes.push(`opencode-providers: not signed in — run /login and pick "${LOGIN_HOST_NAME}", or set OPENCODE_CONSOLE_TOKEN`);
 			return "not signed in";
 		}
-		const { connections, source } = await loadConnections(cfg, state, auth.token, signal);
+		const { connections, source } = await readCatalog(cfg, mode, auth.token, signal);
 		return syncProviders(pi, cfg, state, connections, auth.apiKey, login, `${source}, ${auth.source}`);
 	}
 
@@ -773,7 +785,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			callbacks.onProgress?.(`token accepted: ${listed.length} connection(s), loading catalogs ...`);
 
 			state.sessionToken = token;
-			const summary = await syncNow(callbacks.signal, token);
+			const summary = await syncNow("refresh", callbacks.signal, token);
 			callbacks.onProgress?.(`signed in — ${summary}`);
 
 			// Pi has no default model for this provider, so adopt one itself: logged in means usable.
@@ -799,8 +811,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	pi.on("session_start", (_event, ctx) => {
 		state.ctx = ctx; // needed to resolve a Model for pi.setModel() after a later /login
 		// A `/login` in another session, or a fresh env token, can make signing in possible later.
+		// Cache mode: assembling the providers here never touches the network.
 		if (state.registered.size === 0 && resolveToken(cfg, state)) {
-			syncNow().catch((error) => state.notes.push(`opencode-providers: ${error instanceof Error ? error.message : String(error)}`));
+			syncNow("cache").catch((error) => state.notes.push(`opencode-providers: ${error instanceof Error ? error.message : String(error)}`));
 		}
 		flushNotes(ctx);
 		ctx.ui.setStatus("opencode-providers", state.registered.size > 0 ? `⟡ opencode ${state.registered.size}` : undefined);
@@ -819,7 +832,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			if (action === "refresh") {
 				state.sessionToken = undefined; // re-resolve: env, auth.json, then this session's login
 				try {
-					ctx.ui.notify(`opencode: ${await syncNow(ctx.signal)}`, "info");
+					ctx.ui.notify(`opencode: ${await syncNow("refresh", ctx.signal)}`, "info");
 				} catch (error) {
 					ctx.ui.notify(`opencode refresh failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
@@ -884,9 +897,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		},
 	});
 
-	// Pi waits for this factory, so models are ready before startup model selection.
+	// Pi waits for this factory, and this stays network-free: read the cache written by an earlier
+	// /login or /opencode refresh. Without a cache, only the anchor is registered and the session
+	// start notice tells the user how to build one.
 	try {
-		await syncNow();
+		await syncNow("cache");
 	} catch (error) {
 		state.notes.push(`opencode-providers: ${error instanceof Error ? error.message : String(error)}`);
 	}

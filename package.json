@@ -1,7 +1,7 @@
 {
 	"name": "@nickdevelop/pi-plugins",
-	"version": "0.2.0",
-	"description": "Pi coding-agent packages. Ships opencode-providers: registers every OpenCode Console connection as its own Pi model provider.",
+	"version": "0.3.0",
+	"description": "Pi coding-agent packages. Ships opencode-providers (OpenCode Console connections as Pi model providers) and ask-user-question (a structured questionnaire tool for the model).",
 	"type": "module",
 	"license": "MIT",
 	"repository": {
@@ -19,25 +19,35 @@
 		"opencode",
 		"opencode-console",
 		"providers",
-		"models"
+		"models",
+		"questionnaire",
+		"ask-user-question"
 	],
 	"files": [
 		"opencode-providers/*.ts",
 		"opencode-providers/README.md",
+		"ask-user-question/**/*.ts",
+		"ask-user-question/locales/",
+		"ask-user-question/docs/",
+		"ask-user-question/README.md",
+		"ask-user-question/LICENSE",
 		"README.md"
 	],
 	"scripts": {
 		"test": "node --experimental-strip-types --no-warnings opencode-providers/test.ts",
 		"test:live": "LIVE=1 node --experimental-strip-types --no-warnings opencode-providers/test.ts",
-		"typecheck": "npx --yes -p typescript@5.9.3 tsc --noEmit --strict --skipLibCheck --target es2022 --module nodenext --moduleResolution nodenext --allowImportingTsExtensions opencode-providers/index.ts opencode-providers/test.ts opencode-providers/fixtures.ts"
+		"typecheck": "npx --yes -p typescript@5.9.3 tsc --noEmit --strict --skipLibCheck --target es2022 --module nodenext --moduleResolution nodenext --allowImportingTsExtensions opencode-providers/index.ts opencode-providers/test.ts opencode-providers/fixtures.ts ask-user-question/index.ts"
 	},
 	"pi": {
 		"extensions": [
-			"./opencode-providers/index.ts"
+			"./opencode-providers/index.ts",
+			"./ask-user-question/index.ts"
 		]
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*"
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
 	}
 }

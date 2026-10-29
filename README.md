@@ -29,6 +29,7 @@ pi -e git:github.com/nickdevelop/pi-plugins -p "hi"   # 不写入 settings，单
 | 插件 | 入口 | 作用 |
 |---|---|---|
 | [opencode-providers](./opencode-providers/README.md) | `opencode-providers/index.ts` | 把 OpenCode Console 的每个连接注册成 Pi 的一个独立 provider（只注册 `enabled` 模型），支持 `/login` 登录 |
+| [ask-user-question](./ask-user-question/README.md) | `ask-user-question/index.ts` | 给模型一个 `ask_user_question` 工具：最多 4 个问题的选项卡式问卷，带选项描述、markdown 预览、备注、多选与自定义回答，支持终端 / RPC 主机与非交互降级 |
 
 装完后在 Pi 里：
 
@@ -37,6 +38,8 @@ pi -e git:github.com/nickdevelop/pi-plugins -p "hi"   # 不写入 settings，单
 /opencode                  → 状态：provider 数、模型数、token 来源、被隐藏的免费档
 /opencode refresh|list|models <provider>|probe <provider>
 ```
+
+ask-user-question 无需配置：重启后模型即可调用 `ask_user_question`。选项里 `↑/↓` 移动、`Enter` 选择、`n` 加备注、`Tab` 切换问题、`Esc` 放弃；非交互运行会自动把该工具从模型工具列表里摘掉。可选配置在 `~/.config/ask-user-question/config.json`（`collapseKey` / `notesKey` / `guidance.*`），界面语言跟随 `PI_LANG`、`LC_ALL`、`LC_MESSAGES`、`LANG`（内置 de/es/fr/pt/pt-BR/ru/uk/zh），细节见 [插件 README](./ask-user-question/README.md)。
 
 ## 只加载需要的插件
 
@@ -53,6 +56,8 @@ pi -e git:github.com/nickdevelop/pi-plugins -p "hi"   # 不写入 settings，单
 }
 ```
 
+把想保留的入口写进 `extensions` 即可（例如只留 `ask-user-question/index.ts`）。
+
 ## 开发
 
 ```bash
@@ -60,11 +65,14 @@ npm test                # 用 fixtures 模拟 Console，无需网络
 npm run test:live       # 打真实 Console API，需要 OPENCODE_CONSOLE_TOKEN
 npm run typecheck       # tsc --strict（通过 npx 临时取 typescript）
 pi -e ./opencode-providers -p "hi"     # 本地目录直接试，不走安装
+pi -e ./ask-user-question              # 交互式试问卷（非交互模式看不到该工具）
 ```
 
-本仓库的 `node_modules/@earendil-works/*` 只是本地开发用的符号链接（已 gitignore）：扩展 import 的 `@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent` 由 Pi 运行时提供，因此声明在 `peerDependencies`，**不要**放进 `dependencies`（真实副本会绕过 Pi 的模块映射，产生重复注册）。
+本仓库的 `node_modules/@earendil-works/*` 与 `node_modules/typebox` 只是本地开发用的符号链接（已 gitignore）：扩展 import 的 `@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`、`@earendil-works/pi-tui`、`typebox` 由 Pi 运行时提供（Pi 的加载器对它们做了 alias），因此声明在 `peerDependencies`，**不要**放进 `dependencies`（真实副本会绕过 Pi 的模块映射，产生重复注册）。
 
 测试脚本用 Node 直接跑 `.ts`（`--experimental-strip-types`），只需要类型导入，因此无需安装任何依赖。
+
+ask-user-question 目前没有随仓库带测试（上游测试依赖 vitest 与私有的 `rpiv-test-utils`），改动后用 `npm run typecheck` 与 `pi -e ./ask-user-question` 自测。
 
 ### 加一个新插件
 
